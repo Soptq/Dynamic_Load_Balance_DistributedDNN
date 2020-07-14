@@ -1,0 +1,6 @@
+/logs/
+/venv/
+/data/
+/.idea/
+
+*.pyc
