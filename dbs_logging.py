@@ -3,6 +3,10 @@ import logging, socket, os
 # Log-Related Variables
 
 def init_logger(args, rank, output_dir="./logs"):
+
+    if not os.path.exists(output_dir):
+        os.mkdir(output_dir)
+
     extra = {
         "world_size": args.world_size,
         "lr": args.learning_rate,
