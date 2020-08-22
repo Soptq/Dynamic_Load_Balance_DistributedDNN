@@ -40,7 +40,7 @@ class DataPartitioner(object):
         return Partition(self.data, self.partitions[partition]), self.bsz[partition]
 
 
-def partition_dataset(partition_sizes, rank, debug_mode_enabled, batch_size):
+def partition_dataset(partition_sizes, rank, debug_mode_enabled, batch_size, seed):
     if debug_mode_enabled:
         dataset = datasets.FashionMNIST('./data', train=True, download=True,
                                  transform=transforms.Compose([
@@ -67,7 +67,7 @@ def partition_dataset(partition_sizes, rank, debug_mode_enabled, batch_size):
                                        transforms.ToTensor(),
                                        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
                                    ]))
-    partition = DataPartitioner(dataset, batch_size, partition_sizes)
+    partition = DataPartitioner(dataset, batch_size, partition_sizes, seed=seed)
     partition, bsz = partition.use(rank)
     train_set = DataLoader(partition, batch_size=int(bsz), shuffle=True)
     val_set = DataLoader(testset, batch_size=int(bsz), shuffle=False)

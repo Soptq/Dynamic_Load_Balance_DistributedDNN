@@ -52,4 +52,8 @@ def get_parser():
     parser.add_argument('-ftc', '--fault_tolerance_chance', type=float, default=0.1, required=False,
                         help="Configure how much chance there are for a worker to be slowed down. This option will "
                              "only takes effect when -ft is set to True. Default: 0.1.")
+    parser.add_argument('-ocp', '--one_cycle_policy', type=str2bool, default=False, required=False,
+                        help="Enable One Cycle Policy, which makes learning rate starts at 1/100 learning rate,"
+                             "gradually increases to learning rate, and finally decreases to 1/100 learning rate at the"
+                             "end.")
     return parser

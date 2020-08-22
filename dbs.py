@@ -1,4 +1,4 @@
-import random, math
+import random, math, json
 
 import os
 import time
@@ -35,8 +35,9 @@ epoch_size = args.epoch_size
 dbs_enabled = args.dynamic_batch_size
 gpu = args.gpu
 training_model = args.model
-ft_enable = args.fault_tolerance
+ft_enabled = args.fault_tolerance
 ftc = args.fault_tolerance_chance
+ocp_enabled = args.one_cycle_policy
 
 """
 ##########################################################################################
@@ -57,14 +58,13 @@ else:
     DEVICE = None
 
 # Fault-Tolerance-Related Variables
-fault_wait = False      # Flag that indicates if current worker is in a random waiting phase.
-fault_round = 0         # Random integer that indicates when will current worker stop waiting.
-fault_wait_time = 0     # Random integer that indicates how many seconds current worker needs to wait.
-current_epoch = -1      # A variable that stores current epoch number.
+fault_wait = False  # Flag that indicates if current worker is in a random waiting phase.
+fault_round = 0  # Random integer that indicates when will current worker stop waiting.
+fault_wait_time = 0  # Random integer that indicates how many seconds current worker needs to wait.
+current_epoch = -1  # A variable that stores current epoch number.
 
 # Log-Related Variables
 logger = None
-
 
 """
 ##########################################################################################
@@ -79,13 +79,13 @@ logger = None
 
 
 def fault_tolerance_wait(epoch, batch_num, rank):
-    global fault_round, fault_wait, ftc, ft_enable, fault_wait_time, saved_epoch
+    global fault_round, fault_wait, ftc, ft_enabled, fault_wait_time, saved_epoch
 
-    if not ft_enable:
+    if not ft_enabled:
         return
 
     if fault_wait:  # Current worker is in a waiting phase
-        if epoch <= fault_round:    # waiting is not completed, wait.
+        if epoch <= fault_round:  # waiting is not completed, wait.
             # Need to split the fault_wait_time into batch_num parts, as fault_wait_time is for a epoch not a iteration.
             time.sleep(float(fault_wait_time) / float(batch_num))
             return
@@ -145,6 +145,7 @@ def validate(val_loader, model, criterion, epoch, num_batches):
     accuracy = 100 * correct / total
     logger.info(
         f'Rank {dist.get_rank()}, epoch {epoch}, val_loss {val_loss / num_batches}, accuracy {accuracy}')
+    return val_loss / num_batches, accuracy
 
 
 """
@@ -156,7 +157,28 @@ def validate(val_loader, model, criterion, epoch, num_batches):
 """
 
 
-def train(trainloader, model, optimizer, criterion, epoch, num_batches):
+def adjust_learning_rate(optimizer, epoch):
+    global lr, epoch_size
+    """
+    One Cycle Policy
+    0 <= epoch < 0.3 * epoch_size: 0.01 * lr + ((0.99 * lr) / (epoch_size * 0.3)) * epoch
+    0.3 * epoch_size <= epoch < 0.7 * epoch_size: lr
+    0.7 * epoch_size <= epoch < epoch_size: lr - ((0.99 * lr) / (epoch_size * 0.3)) * (epoch - 0.7 * epoch)
+    """
+    if 0 <= epoch < 0.3 * epoch_size:
+        _lr = 0.01 * lr + ((0.99 * lr) / (0.3 * epoch_size)) * epoch
+    elif 0.7 * epoch_size:
+        _lr = lr - ((0.99 * lr) / (0.3 * epoch_size)) * (epoch - 0.7 * epoch)
+    else:
+        _lr = lr
+
+    for param_group in optimizer.param_groups:
+        param_group['lr'] = _lr
+
+
+def train(trainloader, model, optimizer, criterion, epoch, num_batches, partition_size):
+    _rank = dist.get_rank()
+    _world_size = dist.get_world_size()
     model.train()
     epoch_loss = 0.0
     running_loss = 0.0
@@ -173,7 +195,7 @@ def train(trainloader, model, optimizer, criterion, epoch, num_batches):
         loss = criterion(output, target)
         loss.backward()
         fault_tolerance_wait(epoch, num_batches, dist.get_rank())  # Tolerance test
-        wait_time = SSGD(model)   # Model averaging
+        wait_time = SSGD(model, _rank, _world_size, partition_size)  # Model averaging
         optimizer.step()
         epoch_loss += loss.item()
         running_loss += loss.item()
@@ -181,22 +203,23 @@ def train(trainloader, model, optimizer, criterion, epoch, num_batches):
         average_time += wait_time
         if i % 10 == 0:
             logger.info(
-                f'Rank {dist.get_rank()}, epoch {epoch}: {i}, train_time {train_time}, average_time {average_time}, train_loss {running_loss / (10.0 if i is not 0 else 1.0)}')
+                f'Rank {_rank}, epoch {epoch}: {i}, train_time {train_time}, average_time {average_time}, train_loss {running_loss / (10.0 if i is not 0 else 1.0)}')
             running_loss = 0.0
     train_time = time.time() - start_time
     logger.info(
-        f'Rank {dist.get_rank()}, epoch {epoch}, train_time {train_time}, train_loss {epoch_loss / num_batches}')
-    return train_time - average_time
+        f'Rank {_rank}, epoch {epoch}, train_time {train_time}, train_loss {epoch_loss / num_batches}')
+    return train_time - average_time, average_time, epoch_loss / num_batches
 
 
-def SSGD(model):
+def SSGD(model, _rank, _world_size, partition_size: np.ndarray):
     wait_time = 0.0
+    weighted = _world_size * partition_size[_rank] / partition_size.sum()
     for param in model.parameters():
-        req = dist.all_reduce(param.grad.data, op=dist.ReduceOp.SUM, async_op=True)
+        req = dist.all_reduce(weighted * param.grad.data, op=dist.ReduceOp.SUM, async_op=True)
         send_start = time.time()
         req.wait()
         wait_time += time.time() - send_start
-        param.grad.data /= float(world_size)
+        # param.grad.data /= float(world_size)
     return wait_time
 
 
@@ -209,10 +232,23 @@ def SSGD(model):
 """
 
 
-def run(rank, size):
+def run(rank, size, seed=1234):
     global lr, debug_mode_enabled, dbs_enabled
+
+    if rank == 0:
+        data_recorder = {"epoch": [],
+                         "train_loss": [],
+                         "train_time": [],
+                         "sync_time": [],
+                         "val_loss": [],
+                         "accuracy": [],
+                         "partition": [],
+                         "node_time": [],
+                         "wallclock_time": [],
+                         }
+
     logger.info(f'Initiating Rank {rank}, World Size {size}')
-    torch.manual_seed(1234)
+    torch.manual_seed(seed)
 
     # Configure training model
     if debug_mode_enabled:
@@ -232,18 +268,20 @@ def run(rank, size):
             import Net.RegNet
             model = Net.RegNet.RegNetY_400MF()
     model = model.to(DEVICE)
-    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.5)
+    optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
 
     # Initialize default batch size distribution
     # At the beginning we assume all workers have the same performance.
-    nodes_time = np.array([1.0 for _ in range(size)])   # Training time of workers
-    partition_size = np.array([1.0 / size for _ in range(size)])    # Dataset partition ratio
+    nodes_time = np.array([1.0 for _ in range(size)])  # Training time of workers
+    partition_size = np.array([1.0 / size for _ in range(size)])  # Dataset partition ratio
 
     # Start training
     logger.info(f'Rank {rank} start training')
-    total_train_time = 0    # Count total train time
+    total_train_time = 0  # Count total train time
 
     for epoch in range(epoch_size):
+        if ocp_enabled:
+            adjust_learning_rate(optimizer, epoch)
         if dbs_enabled:
             # Calculated dataset partition ratio based on workers' training time and last epoch's partition ratio.
             partition_size = get_size(nodes_time, partition_size)
@@ -251,23 +289,46 @@ def run(rank, size):
 
         # Using calculated partition size to split dataset, getting train_set, val_set, as well as corresponding
         # batch size of current worker
-        train_set, val_set, bsz = dataloader.partition_dataset(partition_size, rank, debug_mode_enabled, batch_size)
-        num_batches = math.ceil(len(train_set.dataset) / float(bsz))    # Calculate how many iterations in this epoch.
+        train_set, val_set, bsz = \
+            dataloader.partition_dataset(partition_size, rank, debug_mode_enabled, batch_size, seed)
+        num_batches = math.ceil(len(train_set.dataset) / float(bsz))  # Calculate how many iterations in this epoch.
         logger.info(
             f"Rank {rank}, number of batches {num_batches}, batch size {train_set.batch_size}, "
             f"length {train_set.batch_size * num_batches}")
 
         epoch_start_time = time.time()
         # train() returned train_time excludes the communication time.
-        train_time = train(train_set, model, optimizer, F.cross_entropy, epoch, num_batches)
+        train_time, sync_time, train_loss = train(train_set, model, optimizer, F.cross_entropy, epoch, num_batches,
+                                                  partition_size)
         total_train_time += time.time() - epoch_start_time  # Get time that includes communication time.
 
-        validate(val_set, model, F.cross_entropy, epoch, num_batches)
+        val_loss, accuracy = validate(val_set, model, F.cross_entropy, epoch, num_batches)
 
         if dbs_enabled:
             # Exchange pure train time for dataset partition ratio calculating in the next epoch.
             nodes_time = time_allreduce(torch.tensor([train_time], dtype=torch.float32).cpu(), rank, size)
             logger.info(f"Rank {rank}, total time {nodes_time}")
+
+        # record statistic data
+        if rank == 0:
+            data_recorder["epoch"].append(epoch)
+            data_recorder["train_time"].append(train_time)
+            data_recorder["sync_time"].append(sync_time)
+            data_recorder["train_loss"].append(train_loss)
+            data_recorder["val_loss"].append(val_loss)
+            data_recorder["accuracy"].append(accuracy)
+            data_recorder["partition"].append(partition_size)
+            data_recorder["node_time"].append(nodes_time)
+            data_recorder["wallclock_time"].append(total_train_time)
+
+    if rank == 0:
+        json_filename = '%s-debug_%d-n_%d-bs_%d-lr_%.4f-ep_%d-dbs_%d-ft_%d-ftc_%f-node%d-ocp%d.json' \
+                        % (args.model, int(args.debug), args.world_size, args.batch_size,
+                           args.learning_rate, args.epoch_size, int(args.dynamic_batch_size),
+                           int(args.fault_tolerance), args.fault_tolerance_chance,
+                           rank, int(args.one_cycle_policy))
+        with open(json_filename, 'w+', encoding='utf-8') as json_file:
+            json.dump(data_recorder, json_file, ensure_ascii=False)
 
     logger.info(f'Rank {rank} Terminated')
     logger.info(f'Rank {rank} Total Time:')
