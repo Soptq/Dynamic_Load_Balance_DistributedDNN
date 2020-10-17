@@ -32,5 +32,9 @@ Details of other arguments can be referred in `parser.py`
 
 ## Citation
 ```
-
+@inproceedings{Ye2020DBSDB,
+  title={DBS: Dynamic Batch Size For Distributed Deep Neural Network Training},
+  author={Qing Ye and Yuhao Zhou and Mingjia Shi and Yanan Sun and Jiancheng Lv},
+  year={2020}
+}
 ```
