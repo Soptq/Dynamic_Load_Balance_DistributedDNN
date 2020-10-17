@@ -32,12 +32,14 @@ world_size = args.world_size
 batch_size = args.batch_size
 lr = args.learning_rate
 epoch_size = args.epoch_size
+dataset = args.dataset
 dbs_enabled = args.dynamic_batch_size
 gpu = args.gpu
 training_model = args.model
 ft_enabled = args.fault_tolerance
 ftc = args.fault_tolerance_chance
 ocp_enabled = args.one_cycle_policy
+_disabled_enhancements = args.disable_enhancements
 
 """
 ##########################################################################################
@@ -46,6 +48,15 @@ ocp_enabled = args.one_cycle_policy
 #
 ##########################################################################################
 """
+# Saved file name
+base_filename = '%s-%s-debug%d-n%d-bs%d-lr%.4f-ep%d-dbs%d-ft%d-ftc%f-node%s-ocp%d'\
+                            % (args.model, args.dataset, int(args.debug), args.world_size, args.batch_size,
+                               args.learning_rate, args.epoch_size, int(args.dynamic_batch_size),
+                               int(args.fault_tolerance), args.fault_tolerance_chance,
+                               "{}", int(args.one_cycle_policy))
+
+if _disabled_enhancements:
+    base_filename = "puredbs=" + base_filename
 
 # Configure Processing Unit
 if debug_mode_enabled:
@@ -165,9 +176,14 @@ def adjust_learning_rate(optimizer, epoch):
     0.3 * epoch_size <= epoch < 0.7 * epoch_size: lr
     0.7 * epoch_size <= epoch < epoch_size: lr - ((0.99 * lr) / (epoch_size * 0.3)) * (epoch - 0.7 * epoch)
     """
-    if 0 <= epoch < 0.3 * epoch_size:
-        _lr = 0.01 * lr + ((0.99 * lr) / (0.3 * epoch_size)) * epoch
-    elif 0.7 * epoch_size:
+
+    if _disabled_enhancements:
+        return
+
+    # if 0 <= epoch < 0.3 * epoch_size:
+    #     _lr = 0.01 * lr + ((0.99 * lr) / (0.3 * epoch_size)) * epoch
+    # elif 0.7 * epoch_size:
+    if 0.7 * epoch_size <= epoch < epoch_size:
         _lr = lr - ((0.99 * lr) / (0.3 * epoch_size)) * (epoch - 0.7 * epoch)
     else:
         _lr = lr
@@ -213,7 +229,7 @@ def train(trainloader, model, optimizer, criterion, epoch, num_batches, partitio
 
 def SSGD(model, _rank, _world_size, partition_size: np.ndarray):
     wait_time = 0.0
-    weighted = _world_size * partition_size[_rank] / partition_size.sum()
+    weighted = (partition_size[_rank] / partition_size.sum()) if not _disabled_enhancements else (1 / _world_size)
     for param in model.parameters():
         req = dist.all_reduce(weighted * param.grad.data, op=dist.ReduceOp.SUM, async_op=True)
         send_start = time.time()
@@ -251,23 +267,32 @@ def run(rank, size, seed=1234):
     torch.manual_seed(seed)
 
     # Configure training model
-    if debug_mode_enabled:
+
+    num_classes = 10
+    if args.dataset == "cifar100":
+        num_classes = 100
+
+    if args.model == "mnistnet":
         import Net.MnistNet
         model = Net.MnistNet.MnistNet()
-    else:
-        if args.model == "resnet":
-            import Net.Resnet
-            model = Net.Resnet.ResNet101()
-        if args.model == "densenet":
-            import Net.Densenet
-            model = Net.Densenet.DenseNet121()
-        if args.model == "googlenet":
-            import Net.GoogleNet
-            model = Net.GoogleNet.GoogLeNet()
-        if args.model == "regnet":
-            import Net.RegNet
-            model = Net.RegNet.RegNetY_400MF()
+    if args.model == "resnet":
+        import Net.Resnet
+        model = Net.Resnet.ResNet101(num_classes)
+    if args.model == "densenet":
+        import Net.Densenet
+        model = Net.Densenet.DenseNet121(num_classes)
+    if args.model == "googlenet":
+        import Net.GoogleNet
+        model = Net.GoogleNet.GoogLeNet(num_classes)
+    if args.model == "regnet":
+        import Net.RegNet
+        model = Net.RegNet.RegNetY_400MF(num_classes)
     model = model.to(DEVICE)
+
+    for name, param in model.named_parameters():
+        dist.all_reduce(param.data, op=dist.ReduceOp.SUM)
+        param.data /= float(size)
+        
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
 
     # Initialize default batch size distribution
@@ -286,11 +311,10 @@ def run(rank, size, seed=1234):
             # Calculated dataset partition ratio based on workers' training time and last epoch's partition ratio.
             partition_size = get_size(nodes_time, partition_size)
             logger.info(f"Rank {rank}, adjusted partition size to {partition_size}")
-
         # Using calculated partition size to split dataset, getting train_set, val_set, as well as corresponding
         # batch size of current worker
         train_set, val_set, bsz = \
-            dataloader.partition_dataset(partition_size, rank, debug_mode_enabled, batch_size, seed)
+            dataloader.partition_dataset(dataset, partition_size, rank, batch_size, seed)
         num_batches = math.ceil(len(train_set.dataset) / float(bsz))  # Calculate how many iterations in this epoch.
         logger.info(
             f"Rank {rank}, number of batches {num_batches}, batch size {train_set.batch_size}, "
@@ -322,13 +346,8 @@ def run(rank, size, seed=1234):
             data_recorder["wallclock_time"].append(total_train_time)
 
     if rank == 0:
-        json_filename = '%s-debug_%d-n_%d-bs_%d-lr_%.4f-ep_%d-dbs_%d-ft_%d-ftc_%f-node%d-ocp%d.json' \
-                        % (args.model, int(args.debug), args.world_size, args.batch_size,
-                           args.learning_rate, args.epoch_size, int(args.dynamic_batch_size),
-                           int(args.fault_tolerance), args.fault_tolerance_chance,
-                           rank, int(args.one_cycle_policy))
-        with open(json_filename, 'w+', encoding='utf-8') as json_file:
-            json.dump(data_recorder, json_file, ensure_ascii=False)
+        npy_filename = base_filename.format(str(rank)) + ".npy"
+        np.save(os.path.join("./statis", npy_filename), data_recorder)
 
     logger.info(f'Rank {rank} Terminated')
     logger.info(f'Rank {rank} Total Time:')
@@ -408,12 +427,20 @@ def init_processes(rank, size, fn, backend='gloo'):
         DEVICE = "cuda:{}".format(gpu[rank])
         torch.cuda.set_device(gpu[rank])
 
-    logger = dbs_logging.init_logger(args, rank)
+    logger = dbs_logging.init_logger(args, rank, base_filename)
 
     fn(rank, size)
 
 
 if __name__ == "__main__":
+    if os.path.isfile(os.path.join("./statis", base_filename.format("0") + ".npy")):
+        print("")
+        print("===========================")
+        print("Had finished this experiments, skipping...")
+        print("===========================")
+        print("")
+        exit(0)
+
     processes = []
     for rank in range(world_size):
         p = Process(target=init_processes, args=(rank, world_size, run))

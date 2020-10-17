@@ -40,19 +40,19 @@ class DataPartitioner(object):
         return Partition(self.data, self.partitions[partition]), self.bsz[partition]
 
 
-def partition_dataset(partition_sizes, rank, debug_mode_enabled, batch_size, seed):
-    if debug_mode_enabled:
+def partition_dataset(dataset, partition_sizes, rank, batch_size, seed):
+    if dataset == "mnist":
         dataset = datasets.FashionMNIST('./data', train=True, download=True,
-                                 transform=transforms.Compose([
-                                     transforms.ToTensor(),
-                                     transforms.Normalize((0.1307,), (0.3081,))
-                                 ]))
+                                        transform=transforms.Compose([
+                                            transforms.ToTensor(),
+                                            transforms.Normalize((0.1307,), (0.3081,))
+                                        ]))
         testset = datasets.FashionMNIST('./data', train=False, download=True,
-                                 transform=transforms.Compose([
-                                     transforms.ToTensor(),
-                                     transforms.Normalize((0.1307,), (0.3081,))
-                                 ]))
-    else:
+                                        transform=transforms.Compose([
+                                            transforms.ToTensor(),
+                                            transforms.Normalize((0.1307,), (0.3081,))
+                                        ]))
+    elif dataset == "cifar10":
         dataset = datasets.CIFAR10('./data', train=True, download=True,
                                    transform=transforms.Compose([
                                        transforms.RandomCrop(32, padding=4),
@@ -66,6 +66,21 @@ def partition_dataset(partition_sizes, rank, debug_mode_enabled, batch_size, see
                                        transforms.RandomHorizontalFlip(),
                                        transforms.ToTensor(),
                                        transforms.Normalize((0.4914, 0.4822, 0.4465), (0.2023, 0.1994, 0.2010)),
+                                   ]))
+    elif dataset == "cifar100":
+        dataset = datasets.CIFAR100('./data', train=True, download=True,
+                                   transform=transforms.Compose([
+                                       transforms.RandomCrop(32, padding=4),
+                                       transforms.RandomHorizontalFlip(),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762)),
+                                   ]))
+        testset = datasets.CIFAR100('./data', train=False, download=True,
+                                   transform=transforms.Compose([
+                                       transforms.RandomCrop(32, padding=4),
+                                       transforms.RandomHorizontalFlip(),
+                                       transforms.ToTensor(),
+                                       transforms.Normalize((0.5071, 0.4865, 0.4409), (0.2673, 0.2564, 0.2762)),
                                    ]))
     partition = DataPartitioner(dataset, batch_size, partition_sizes, seed=seed)
     partition, bsz = partition.use(rank)

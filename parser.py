@@ -1,6 +1,10 @@
 import argparse
 
 
+_method_list = ["mnistnet", "resnet", "densenet", "googlenet", "regnet"]
+_dataset_list = ["cifar10", "cifar100", "mnist"]
+
+
 def str2bool(v):
     if isinstance(v, bool):
         return v
@@ -21,6 +25,18 @@ def gpu_list(v):
         raise argparse.ArgumentError("Accepts GPU Number or GPU list")
 
 
+def dataset_list(v):
+    if v not in _dataset_list:
+        raise argparse.ArgumentError("Invalid dataset")
+    return v
+
+
+def model_list(v):
+    if v not in _method_list:
+        raise argparse.ArgumentError("Invalid model")
+    return v
+
+
 def get_parser():
     parser = argparse.ArgumentParser(description="Dynamic Batchsize for Distributed DNN Training")
     parser.add_argument('-d', '--debug', type=str2bool, default=True, required=False,
@@ -35,6 +51,8 @@ def get_parser():
                         help="Configure the learning rate. Default 0.01.")
     parser.add_argument('-e', '--epoch_size', type=int, default=10, required=False,
                         help="Configure the epoch size of the training. Default 10.")
+    parser.add_argument('-ds', '--dataset', type=dataset_list, default='cifar10', required=False,
+                        help="Configure target dataset, options are mnist, cifar10 and cifar100")
     parser.add_argument('-dbs', '--dynamic_batch_size', type=str2bool, default=True, required=False,
                         help="Dynamic Batch Size. Configure to True to enable. Default True.")
     parser.add_argument('-gpu', '--gpu', type=gpu_list, default=0, required=False,
@@ -42,7 +60,7 @@ def get_parser():
                              "If you have multiple GPU cards, split it with comma. E.g. '0,0,0,1' with 4 workers will "
                              "result in "
                              "worker 0-2 to use GPU:0 and worker 3 to use GPU:1.")
-    parser.add_argument('-m', '--model', type=str, default="resnet", required=False,
+    parser.add_argument('-m', '--model', type=model_list, default="resnet", required=False,
                         help="Configure the training model. Default ResNet-101. You can input resnet for ResNet-101, "
                              "densenet for DenseNet121, googlenet for GoogLeNet and regnet for RegNetY_400MF")
     parser.add_argument('-ft', '--fault_tolerance', type=str2bool, default=False, required=False,
@@ -56,4 +74,7 @@ def get_parser():
                         help="Enable One Cycle Policy, which makes learning rate starts at 1/100 learning rate,"
                              "gradually increases to learning rate, and finally decreases to 1/100 learning rate at the"
                              "end.")
+    parser.add_argument('-de', '--disable_enhancements', type=str2bool, default=False, required=False,
+                        help="Temporary disable one cycle policy and dynamic weights. Only for testing. Do not enable"
+                             "it unless you know what you are doing.")
     return parser
