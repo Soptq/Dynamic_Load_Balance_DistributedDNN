@@ -29,12 +29,12 @@ class Block(nn.Module):
         # 1x1
         w_b = int(round(w_out * bottleneck_ratio))
         self.conv1 = nn.Conv2d(w_in, w_b, kernel_size=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(w_b)
+        self.gn1 = nn.GroupNorm(num_groups=32, num_channels=w_b)
         # 3x3
         num_groups = w_b // group_width
         self.conv2 = nn.Conv2d(w_b, w_b, kernel_size=3,
                                stride=stride, padding=1, groups=num_groups, bias=False)
-        self.bn2 = nn.BatchNorm2d(w_b)
+        self.gn2 = nn.GroupNorm(num_groups=32, num_channels=w_b)
         # se
         self.with_se = se_ratio > 0
         if self.with_se:
@@ -42,22 +42,22 @@ class Block(nn.Module):
             self.se = SE(w_b, w_se)
         # 1x1
         self.conv3 = nn.Conv2d(w_b, w_out, kernel_size=1, bias=False)
-        self.bn3 = nn.BatchNorm2d(w_out)
+        self.gn3 = nn.GroupNorm(num_groups=32, num_channels=w_out)
 
         self.shortcut = nn.Sequential()
         if stride != 1 or w_in != w_out:
             self.shortcut = nn.Sequential(
                 nn.Conv2d(w_in, w_out,
                           kernel_size=1, stride=stride, bias=False),
-                nn.BatchNorm2d(w_out)
+                nn.GroupNorm(num_groups=32, num_channels=w_out)
             )
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
-        out = F.relu(self.bn2(self.conv2(out)))
+        out = F.relu(self.gn1(self.conv1(x)))
+        out = F.relu(self.gn2(self.conv2(out)))
         if self.with_se:
             out = self.se(out)
-        out = self.bn3(self.conv3(out))
+        out = self.gn3(self.conv3(out))
         out += self.shortcut(x)
         out = F.relu(out)
         return out
@@ -70,7 +70,7 @@ class RegNet(nn.Module):
         self.in_planes = 64
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
                                stride=1, padding=1, bias=False)
-        self.bn1 = nn.BatchNorm2d(64)
+        self.bn2 = nn.GroupNorm(num_groups=32, num_channels=64)
         self.layer1 = self._make_layer(0)
         self.layer2 = self._make_layer(1)
         self.layer3 = self._make_layer(2)
@@ -94,7 +94,7 @@ class RegNet(nn.Module):
         return nn.Sequential(*layers)
 
     def forward(self, x):
-        out = F.relu(self.bn1(self.conv1(x)))
+        out = F.relu(self.gn1(self.conv1(x)))
         out = self.layer1(out)
         out = self.layer2(out)
         out = self.layer3(out)

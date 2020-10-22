@@ -17,6 +17,8 @@ import parser
 import dataloader
 import dbs_logging
 
+import utils
+
 args = parser.get_parser().parse_args()
 
 """
@@ -203,6 +205,7 @@ def train(trainloader, model, optimizer, criterion, epoch, num_batches, partitio
     start_time = time.time()
 
     for i, data in enumerate(trainloader, 0):
+        logger.info(f"Rank {_rank}, iteration {i}, {utils.print_layer(model, 'fc2.bias')}")
         inputs, target = data
         inputs = inputs.to(DEVICE)
         target = target.to(DEVICE)
@@ -231,11 +234,12 @@ def SSGD(model, _rank, _world_size, partition_size: np.ndarray):
     wait_time = 0.0
     weighted = (partition_size[_rank] / partition_size.sum()) if not _disabled_enhancements else (1 / _world_size)
     for param in model.parameters():
-        req = dist.all_reduce(weighted * param.grad.data, op=dist.ReduceOp.SUM, async_op=True)
+        sync_data = weighted * param.grad.data
+        req = dist.all_reduce(sync_data, op=dist.ReduceOp.SUM, async_op=True)
         send_start = time.time()
         req.wait()
         wait_time += time.time() - send_start
-        # param.grad.data /= float(world_size)
+        param.grad.data = sync_data
     return wait_time
 
 
