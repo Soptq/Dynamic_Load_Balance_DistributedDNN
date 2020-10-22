@@ -205,7 +205,6 @@ def train(trainloader, model, optimizer, criterion, epoch, num_batches, partitio
     start_time = time.time()
 
     for i, data in enumerate(trainloader, 0):
-        logger.info(f"Rank {_rank}, iteration {i}, {utils.print_layer(model, 'fc2.bias')}")
         inputs, target = data
         inputs = inputs.to(DEVICE)
         target = target.to(DEVICE)
