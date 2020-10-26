@@ -70,7 +70,7 @@ class RegNet(nn.Module):
         self.in_planes = 64
         self.conv1 = nn.Conv2d(3, 64, kernel_size=3,
                                stride=1, padding=1, bias=False)
-        self.bn2 = nn.GroupNorm(num_groups=32, num_channels=64)
+        self.gn1 = nn.GroupNorm(num_groups=32, num_channels=64)
         self.layer1 = self._make_layer(0)
         self.layer2 = self._make_layer(1)
         self.layer3 = self._make_layer(2)

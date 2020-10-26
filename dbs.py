@@ -436,7 +436,7 @@ def init_processes(rank, size, fn, backend='gloo'):
 
 
 if __name__ == "__main__":
-    if os.path.isfile(os.path.join("./statis", base_filename.format("0") + ".npy")):
+    if os.path.isfile(os.path.join("./logs", base_filename.format("0") + ".log")):
         print("")
         print("===========================")
         print("Had finished this experiments, skipping...")
@@ -444,6 +444,7 @@ if __name__ == "__main__":
         print("")
         exit(0)
 
+    time.sleep(3)
     processes = []
     for rank in range(world_size):
         p = Process(target=init_processes, args=(rank, world_size, run))
