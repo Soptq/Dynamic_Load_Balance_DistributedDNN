@@ -161,6 +161,26 @@ def validate(val_loader, model, criterion, epoch, num_batches):
     return val_loss / num_batches, accuracy
 
 
+def transformer_validate(val_loader, model, criterion, epoch, num_batches, ntokens, bptt):
+    model.eval()
+    # total = 0
+    # correct = 0
+    val_loss = 0
+    with torch.no_grad():
+        for i in range(0, val_loader.size(0) - 1, bptt):
+            inputs, target = utils.get_batch(val_loader, i, bptt)
+            inputs = inputs.to(DEVICE)
+            target = target.to(DEVICE)
+            output = model(inputs)
+            output = output.view(-1, ntokens)
+            val_loss += len(inputs) * criterion(output, target).item()
+
+    val_loss /= (len(val_loader) - 1)
+    logger.info(
+        f'Rank {dist.get_rank()}, epoch {epoch}, val_loss {val_loss / num_batches}, accuracy {1 - val_loss}')
+    return val_loss / num_batches, 1 - val_loss
+
+
 """
 ##########################################################################################
 #
@@ -181,6 +201,7 @@ def adjust_learning_rate(optimizer, epoch):
 
     if _disabled_enhancements:
         return
+
 
     # if 0 <= epoch < 0.3 * epoch_size:
     #     _lr = 0.01 * lr + ((0.99 * lr) / (0.3 * epoch_size)) * epoch
@@ -219,9 +240,47 @@ def train(trainloader, model, optimizer, criterion, epoch, num_batches, partitio
         running_loss += loss.item()
         train_time = time.time() - start_time
         average_time += wait_time
-        if i % 10 == 0:
+        if i % 10 == 0 and i > 0:
             logger.info(
-                f'Rank {_rank}, epoch {epoch}: {i}, train_time {train_time}, average_time {average_time}, train_loss {running_loss / (10.0 if i is not 0 else 1.0)}')
+                f'Rank {_rank}, epoch {epoch}: {i}, train_time {train_time}, average_time {average_time}, train_loss {running_loss / 10.0}')
+            running_loss = 0.0
+    train_time = time.time() - start_time
+    logger.info(
+        f'Rank {_rank}, epoch {epoch}, train_time {train_time}, train_loss {epoch_loss / num_batches}')
+    return train_time - average_time, average_time, epoch_loss / num_batches
+
+
+def transformer_train(trainloader, model, optimizer, criterion, epoch, num_batches, partition_size, ntokens, bptt):
+    _rank = dist.get_rank()
+    _world_size = dist.get_world_size()
+    model.train()
+    epoch_loss = 0.0
+    running_loss = 0.0
+    average_time = 0.0
+    dist.barrier()
+    start_time = time.time()
+
+    for batch, i in enumerate(range(0, trainloader.size(0) - 1, bptt)):
+        inputs, target = utils.get_batch(trainloader, i, bptt)
+        inputs = inputs.to(DEVICE)
+        target = target.to(DEVICE)
+        optimizer.zero_grad()
+        model.zero_grad()
+        output = model(inputs)
+        output = output.view(-1, ntokens)
+        loss = criterion(output, target)
+        loss.backward()
+        fault_tolerance_wait(epoch, num_batches, dist.get_rank())  # Tolerance test
+        torch.nn.utils.clip_grad_norm_(model.parameters(), 0.25)
+        wait_time = SSGD(model, _rank, _world_size, partition_size)  # Model averaging
+        optimizer.step()
+        epoch_loss += loss.item()
+        running_loss += loss.item()
+        train_time = time.time() - start_time
+        average_time += wait_time
+        if i % 10 == 0 and i > 0:
+            logger.info(
+                f'Rank {_rank}, epoch {epoch}: {i}, train_time {train_time}, average_time {average_time}, train_loss {running_loss / 10.0}')
             running_loss = 0.0
     train_time = time.time() - start_time
     logger.info(
@@ -275,6 +334,14 @@ def run(rank, size, seed=1234):
     if args.dataset == "cifar100":
         num_classes = 100
 
+    ntokens = 33278
+    emsize = 200
+    nhead = 2
+    nhid = 200
+    nlayers = 2
+    dropout = 0.2
+    bptt = 35
+
     if args.model == "mnistnet":
         import Net.MnistNet
         model = Net.MnistNet.MnistNet()
@@ -290,6 +357,9 @@ def run(rank, size, seed=1234):
     if args.model == "regnet":
         import Net.RegNet
         model = Net.RegNet.RegNetY_400MF(num_classes)
+    if args.model == "transformer":
+        import Net.Transformer
+        model = Net.Transformer.TransformerModel(ntokens, emsize, nhead, nhid, nlayers, dropout)
     model = model.to(DEVICE)
 
     for name, param in model.named_parameters():
@@ -297,6 +367,11 @@ def run(rank, size, seed=1234):
         param.data /= float(size)
         
     optimizer = optim.SGD(model.parameters(), lr=lr, momentum=0.9)
+
+    if args.model == "transformer":
+        criterion = F.nll_loss
+    else:
+        criterion = F.cross_entropy
 
     # Initialize default batch size distribution
     # At the beginning we assume all workers have the same performance.
@@ -318,18 +393,32 @@ def run(rank, size, seed=1234):
         # batch size of current worker
         train_set, val_set, bsz = \
             dataloader.partition_dataset(dataset, partition_size, rank, batch_size, seed)
-        num_batches = math.ceil(len(train_set.dataset) / float(bsz))  # Calculate how many iterations in this epoch.
+
+        if args.model == "transformer":
+            num_batches = len(train_set)
+        else:
+            num_batches = math.ceil(len(train_set.dataset) / float(bsz))  # Calculate how many iterations in this epoch.
+
         logger.info(
-            f"Rank {rank}, number of batches {num_batches}, batch size {train_set.batch_size}, "
-            f"length {train_set.batch_size * num_batches}")
+            f"Rank {rank}, number of batches {num_batches}, batch size {bsz}, "
+            f"length {bsz * num_batches}")
 
         epoch_start_time = time.time()
         # train() returned train_time excludes the communication time.
-        train_time, sync_time, train_loss = train(train_set, model, optimizer, F.cross_entropy, epoch, num_batches,
-                                                  partition_size)
+        if args.model == "transformer":
+            train_time, sync_time, train_loss = transformer_train(train_set, model, optimizer, criterion, epoch,
+                                                      num_batches, partition_size, ntokens, bptt)
+        else:
+            train_time, sync_time, train_loss = train(train_set, model, optimizer, criterion, epoch, num_batches,
+                                                      partition_size)
+
         total_train_time += time.time() - epoch_start_time  # Get time that includes communication time.
 
-        val_loss, accuracy = validate(val_set, model, F.cross_entropy, epoch, num_batches)
+        if args.model == "transformer":
+            val_loss, accuracy = transformer_validate(val_set, model, F.cross_entropy, epoch, num_batches,
+                                                      ntokens, bptt)
+        else:
+            val_loss, accuracy = validate(val_set, model, F.cross_entropy, epoch, num_batches)
 
         if dbs_enabled:
             # Exchange pure train time for dataset partition ratio calculating in the next epoch.
