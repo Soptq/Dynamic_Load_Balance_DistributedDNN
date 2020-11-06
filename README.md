@@ -1,6 +1,6 @@
 # DBS
 
-Official Pytorch implementation of "DBS: Dynamic Batch Size for Distributed Deep Neural Network Training".
+Official Pytorch implementation of "DLB: A Dynamic Load Balance Strategy For Robust Distributed Deep Neural Network Training".
 
 ## Quickstart
 ### Cloning
