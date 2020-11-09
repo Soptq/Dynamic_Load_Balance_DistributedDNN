@@ -1,4 +1,4 @@
-# DBS
+# DLB
 
 Official Pytorch implementation of "DLB: A Dynamic Load Balance Strategy For Robust Distributed Deep Neural Network Training".
 
