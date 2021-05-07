@@ -415,10 +415,10 @@ def run(rank, size, seed=1234):
         total_train_time += time.time() - epoch_start_time  # Get time that includes communication time.
 
         if args.model == "transformer":
-            val_loss, accuracy = transformer_validate(val_set, model, F.cross_entropy, epoch, num_batches,
+            val_loss, accuracy = transformer_validate(val_set, model, criterion, epoch, num_batches,
                                                       ntokens, bptt)
         else:
-            val_loss, accuracy = validate(val_set, model, F.cross_entropy, epoch, num_batches)
+            val_loss, accuracy = validate(val_set, model, criterion, epoch, num_batches)
 
         if dbs_enabled:
             # Exchange pure train time for dataset partition ratio calculating in the next epoch.
