@@ -25,7 +25,7 @@ Here we run DBS with DenseNet-121 in 4 workers' distributed environment where wo
 Additionally, the total batchsize of the entire cluster is set to 512, other arguments remain default.
 
 ```
-python dbs.py -d false -ws 4 -b 512 -m densenet -gpu 0,0,0,1
+python dbs.py -d false -ws 4 -b 512 -m densenet -ds cifar10 -gpu 0,0,0,1
 ```
 
 Details of other arguments can be referred in `parser.py`
